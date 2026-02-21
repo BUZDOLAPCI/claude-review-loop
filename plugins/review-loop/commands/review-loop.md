@@ -2,14 +2,28 @@
 description: "Start a review loop: implement task, get independent Codex review, address feedback"
 argument-hint: "<task description>"
 allowed-tools:
-  - "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/setup-review-loop.sh:*)"
-hide-from-slash-command-tool: "true"
+  - Bash
+  - Read
+  - Write
+  - Edit
+  - Glob
+  - Grep
 ---
 
-Run the setup script with the user's arguments:
+First, set up the review loop by running this setup command:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/setup-review-loop.sh" $ARGUMENTS
+set -e && REVIEW_ID="$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 3 2>/dev/null || head -c 3 /dev/urandom | od -An -tx1 | tr -d ' \n')" && mkdir -p .claude reviews && if [ -f .claude/review-loop.local.md ]; then echo "Error: A review loop is already active. Use /cancel-review first." && exit 1; fi && cat > .claude/review-loop.local.md << STATE_EOF
+---
+active: true
+phase: task
+review_id: ${REVIEW_ID}
+started_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+---
+
+$ARGUMENTS
+STATE_EOF
+echo "Review Loop activated (ID: ${REVIEW_ID})"
 ```
 
 After setup completes successfully, proceed to implement the task described in the arguments. Work thoroughly and completely — write clean, well-structured, well-tested code.

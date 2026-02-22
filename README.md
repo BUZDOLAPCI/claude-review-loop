@@ -11,6 +11,9 @@ When you use `/review-loop`, the plugin creates a two-phase lifecycle:
 
 The result: every task gets an independent second opinion before you accept the changes.
 
+<img width="2284" height="1959" alt="memelord_meme_2026-02-22 (3)" src="https://github.com/user-attachments/assets/75af1351-47e6-4b70-a50a-9b3311773be7" />
+
+
 ## Review coverage
 
 The plugin spawns up to 4 parallel Codex sub-agents, depending on project type:

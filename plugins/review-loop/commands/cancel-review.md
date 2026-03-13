@@ -2,7 +2,7 @@
 description: "Cancel an active review loop"
 allowed-tools:
   - Bash(test -f .claude/review-loop.local.md *)
-  - Bash(rm -f .claude/review-loop.local.md)
+  - Bash(rm -f .claude/review-loop.local.md .claude/review-loop.lock)
   - Read
 ---
 
@@ -14,10 +14,10 @@ test -f .claude/review-loop.local.md && echo "ACTIVE" || echo "NONE"
 
 If active, read `.claude/review-loop.local.md` to get the current phase and review ID.
 
-Then remove the state file:
+Then remove the state file and lock file:
 
 ```bash
-rm -f .claude/review-loop.local.md
+rm -f .claude/review-loop.local.md .claude/review-loop.lock
 ```
 
 Report: "Review loop cancelled (was at phase: X, review ID: Y)"

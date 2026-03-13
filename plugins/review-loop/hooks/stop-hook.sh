@@ -11,13 +11,14 @@
 #   REVIEW_LOOP_CODEX_FLAGS  Override codex flags (default: --dangerously-bypass-approvals-and-sandbox)
 
 LOG_FILE=".claude/review-loop.log"
+LOCK_FILE=".claude/review-loop.lock"
 
 log() {
   mkdir -p "$(dirname "$LOG_FILE")"
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] $*" >> "$LOG_FILE"
 }
 
-trap 'log "ERROR: hook exited via ERR trap (line $LINENO)"; printf "{\"decision\":\"approve\"}\n"; exit 0' ERR
+trap 'log "ERROR: hook exited via ERR trap (line $LINENO)"; rm -f "$LOCK_FILE"; printf "{\"decision\":\"approve\"}\n"; exit 0' ERR
 
 # Consume stdin (hook input JSON) — must read to avoid broken pipe
 HOOK_INPUT=$(cat)
@@ -54,14 +55,19 @@ if ! echo "$REVIEW_ID" | grep -qE '^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$'; then
   exit 0
 fi
 
-# Safety: if stop_hook_active is true and we're still in "task" phase,
-# something went wrong with the phase transition. Allow exit to prevent loops.
-STOP_HOOK_ACTIVE=$(echo "$HOOK_INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")
-if [ "$STOP_HOOK_ACTIVE" = "true" ] && [ "$PHASE" = "task" ]; then
-  log "WARN: stop_hook_active=true in task phase, aborting to prevent loop"
-  rm -f "$STATE_FILE"
-  printf '{"decision":"approve"}\n'
-  exit 0
+# Re-entrancy guard: if another hook instance is already running Codex,
+# block exit with a "please wait" message instead of launching a second Codex.
+if [ -f "$LOCK_FILE" ]; then
+  LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+    log "SKIP: another hook is running Codex review (PID=$LOCK_PID)"
+    jq -n '{decision:"block", reason:"Codex review is still running. Please wait for it to complete."}' 2>/dev/null \
+      || printf '{"decision":"block","reason":"Codex review is still running. Please wait for it to complete."}\n'
+    exit 0
+  else
+    log "WARN: removing stale lock (PID=$LOCK_PID)"
+    rm -f "$LOCK_FILE"
+  fi
 fi
 
 # ── Project type detection ────────────────────────────────────────────────
@@ -265,6 +271,31 @@ IMPORTANT: You MUST create the file ${REVIEW_FILE} with the full review.
 CONSOLIDATION_EOF
 }
 
+# ── Rewrite state file to update phase (atomic, no fragile sed regex) ──────
+transition_phase() {
+  local new_phase="$1"
+  local TEMP_FILE="${STATE_FILE}.tmp.$$"
+
+  # Rewrite: replace 'phase: <anything>' with 'phase: <new_phase>'
+  # Use awk for robustness — handles whitespace variants, no anchoring issues
+  awk -v np="$new_phase" '{
+    if ($0 ~ /^phase:/) { print "phase: " np }
+    else { print }
+  }' "$STATE_FILE" > "$TEMP_FILE"
+
+  mv "$TEMP_FILE" "$STATE_FILE"
+
+  # Verify the transition succeeded
+  local CHECK
+  CHECK=$(parse_field "phase")
+  if [ "$CHECK" != "$new_phase" ]; then
+    log "ERROR: phase transition failed (expected=$new_phase, got=$CHECK)"
+    return 1
+  fi
+  log "Phase transitioned to: $new_phase"
+  return 0
+}
+
 case "$PHASE" in
   task)
     # ── Phase 1 → 2: Run Codex multi-agent review ──────────────────────
@@ -286,7 +317,8 @@ case "$PHASE" in
 Install it: npm install -g @openai/codex
 
 Then run /review-loop again. Multi-agent will be auto-configured."
-      jq -n --arg r "$REASON" '{decision:"block", reason:$r}'
+      jq -n --arg r "$REASON" '{decision:"block", reason:$r}' 2>/dev/null \
+        || printf '{"decision":"block","reason":"Codex CLI is not installed. Install it: npm install -g @openai/codex"}\n'
       exit 0
     fi
 
@@ -302,9 +334,13 @@ Add to ~/.codex/config.toml:
   multi_agent = true
 
 Then run /review-loop again."
-      jq -n --arg r "$REASON" '{decision:"block", reason:$r}'
+      jq -n --arg r "$REASON" '{decision:"block", reason:$r}' 2>/dev/null \
+        || printf '{"decision":"block","reason":"Codex multi-agent is not enabled in ~/.codex/config.toml"}\n'
       exit 0
     fi
+
+    # Acquire lock to prevent concurrent Codex launches
+    echo $$ > "$LOCK_FILE"
 
     log "Starting Codex multi-agent review (flags: $CODEX_FLAGS)"
     # shellcheck disable=SC2086
@@ -312,11 +348,13 @@ Then run /review-loop again."
     ELAPSED=$(( $(date +%s) - START_TIME ))
     log "Codex finished (exit=$CODEX_EXIT, elapsed=${ELAPSED}s)"
 
-    # Transition to addressing phase
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-      sed -i '' 's/^phase: task$/phase: addressing/' "$STATE_FILE"
-    else
-      sed -i 's/^phase: task$/phase: addressing/' "$STATE_FILE"
+    # Release lock
+    rm -f "$LOCK_FILE"
+
+    # Transition to addressing phase (atomic rewrite, not fragile sed)
+    if ! transition_phase "addressing"; then
+      log "ERROR: phase transition failed, blocking with review anyway"
+      # Continue — we still want to present the review even if state update failed
     fi
 
     if [ ! -f "$REVIEW_FILE" ]; then
@@ -325,7 +363,8 @@ Then run /review-loop again."
       REASON="ERROR: Codex ran but did not produce a review file (${REVIEW_FILE}). This may mean the review timed out or Codex encountered an error. Check .claude/review-loop.log for details.
 
 Run /review-loop again to retry."
-      jq -n --arg r "$REASON" '{decision:"block", reason:$r}'
+      jq -n --arg r "$REASON" '{decision:"block", reason:$r}' 2>/dev/null \
+        || printf '{"decision":"block","reason":"Codex ran but did not produce a review file. Check .claude/review-loop.log for details."}\n'
       exit 0
     fi
 
@@ -343,21 +382,25 @@ Use your own judgment. Do not blindly accept every suggestion."
 
     SYS_MSG="Review Loop [${REVIEW_ID}] — Phase 2/2: Address Codex feedback"
 
+    # Output block decision — use jq with printf fallback to guarantee valid JSON
+    # reaches stdout even if jq fails (prevents ERR trap from approving exit)
     jq -n --arg r "$REASON" --arg s "$SYS_MSG" \
-      '{decision:"block", reason:$r, systemMessage:$s}'
+      '{decision:"block", reason:$r, systemMessage:$s}' 2>/dev/null \
+      || printf '{"decision":"block","reason":"A Codex code review has been written to %s. Please read it and address the findings.","systemMessage":"%s"}\n' \
+           "$REVIEW_FILE" "$SYS_MSG"
     ;;
 
   addressing)
     # ── Phase 2 complete: Claude addressed the review. Allow exit. ───────
     log "Review loop complete (review_id=$REVIEW_ID)"
-    rm -f "$STATE_FILE"
+    rm -f "$STATE_FILE" "$LOCK_FILE"
     printf '{"decision":"approve"}\n'
     ;;
 
   *)
     # Unknown phase — clean up and allow exit
     log "WARN: unknown phase '$PHASE', cleaning up"
-    rm -f "$STATE_FILE"
+    rm -f "$STATE_FILE" "$LOCK_FILE"
     printf '{"decision":"approve"}\n'
     ;;
 esac

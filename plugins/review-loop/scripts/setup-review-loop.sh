@@ -69,6 +69,9 @@ else
 fi
 REVIEW_ID="$(date +%Y%m%d-%H%M%S)-${RAND_HEX}"
 
+# Clean up stale lock from previous runs
+rm -f .claude/review-loop.lock
+
 # Create state file
 mkdir -p .claude
 cat > .claude/review-loop.local.md << STATE_EOF

@@ -4,8 +4,9 @@
 
 A Claude Code plugin that creates a two-phase review loop:
 1. Claude implements a task
-2. Codex independently reviews the changes
-3. Claude addresses the review feedback
+2. Stop hook prepares a Codex runner script and blocks Claude
+3. Claude executes the runner script via Bash (Codex output streams to user)
+4. Claude reads the review and addresses feedback
 
 ## Conventions
 
@@ -15,7 +16,8 @@ A Claude Code plugin that creates a two-phase review loop:
 - State lives in `.claude/review-loop.local.md` — always clean up on exit
 - Lock file at `.claude/review-loop.lock` prevents concurrent Codex launches
 - Review ID format: `YYYYMMDD-HHMMSS-hexhex` — validate before using in paths
-- Codex stdout/stderr is redirected away from hook stdout to prevent JSON corruption
+- Codex runs via a runner script (`.claude/review-loop-run-codex.sh`) that Claude executes via Bash — output streams directly to the user for visibility
+- Codex prompt is saved to `.claude/review-loop-codex-prompt.txt` for the runner script
 - Telemetry goes to `.claude/review-loop.log` — structured, timestamped lines
 - Phase transitions use `transition_phase()` (awk rewrite + verify), NOT fragile sed regex
 - All `jq` calls that produce block decisions MUST have a `|| printf '...'` fallback — if jq fails, the ERR trap would silently approve exit and drop the review

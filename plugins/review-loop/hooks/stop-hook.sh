@@ -298,16 +298,16 @@ transition_phase() {
 
 case "$PHASE" in
   task)
-    # ── Phase 1 → 2: Run Codex multi-agent review ──────────────────────
+    # ── Phase 1 → 2: Prepare Codex review for Claude to run directly ────
+    # Instead of running Codex inside this hook (which blocks Claude and
+    # hides all output), we write the prompt and a runner script, then tell
+    # Claude to execute it via Bash so Codex output streams to the user.
     REVIEW_FILE="reviews/review-${REVIEW_ID}.md"
     mkdir -p reviews
 
     CODEX_PROMPT=$(build_review_prompt "$REVIEW_FILE")
 
-    # Run codex non-interactively with telemetry logging.
     CODEX_FLAGS="${REVIEW_LOOP_CODEX_FLAGS:---dangerously-bypass-approvals-and-sandbox}"
-    CODEX_EXIT=0
-    START_TIME=$(date +%s)
 
     if ! command -v codex &> /dev/null; then
       log "ERROR: codex not found on PATH"
@@ -339,38 +339,47 @@ Then run /review-loop again."
       exit 0
     fi
 
-    # Acquire lock to prevent concurrent Codex launches
-    echo $$ > "$LOCK_FILE"
+    # Write prompt to file for the runner script to read
+    PROMPT_FILE=".claude/review-loop-codex-prompt.txt"
+    printf '%s' "$CODEX_PROMPT" > "$PROMPT_FILE"
 
-    log "Starting Codex multi-agent review (flags: $CODEX_FLAGS)"
-    # shellcheck disable=SC2086
-    codex $CODEX_FLAGS exec "$CODEX_PROMPT" >/dev/null 2>&1 || CODEX_EXIT=$?
-    ELAPSED=$(( $(date +%s) - START_TIME ))
-    log "Codex finished (exit=$CODEX_EXIT, elapsed=${ELAPSED}s)"
+    # Generate runner script that Claude will execute via Bash tool.
+    # ${CODEX_FLAGS} expands at write time to bake in the flags value.
+    # All other $ are escaped so they stay literal in the generated script.
+    RUNNER_SCRIPT=".claude/review-loop-run-codex.sh"
+    cat > "$RUNNER_SCRIPT" << RUNNER_EOF
+#!/usr/bin/env bash
+LOG_FILE=".claude/review-loop.log"
+log() { echo "[\$(date -u +"%Y-%m-%dT%H:%M:%SZ")] \$*" >> "\$LOG_FILE"; }
 
-    # Release lock
-    rm -f "$LOCK_FILE"
+log "Starting Codex multi-agent review"
+START_TIME=\$(date +%s)
 
-    # Transition to addressing phase (atomic rewrite, not fragile sed)
+# shellcheck disable=SC2086
+codex ${CODEX_FLAGS} exec "\$(cat .claude/review-loop-codex-prompt.txt)" || CODEX_EXIT=\$?
+CODEX_EXIT=\${CODEX_EXIT:-0}
+
+ELAPSED=\$(( \$(date +%s) - START_TIME ))
+log "Codex finished (exit=\$CODEX_EXIT, elapsed=\${ELAPSED}s)"
+exit \$CODEX_EXIT
+RUNNER_EOF
+    chmod +x "$RUNNER_SCRIPT"
+
+    # Transition to addressing phase
     if ! transition_phase "addressing"; then
-      log "ERROR: phase transition failed, blocking with review anyway"
-      # Continue — we still want to present the review even if state update failed
+      log "ERROR: phase transition failed"
     fi
 
-    if [ ! -f "$REVIEW_FILE" ]; then
-      log "ERROR: Codex finished but review file not found: $REVIEW_FILE"
-      rm -f "$STATE_FILE"
-      REASON="ERROR: Codex ran but did not produce a review file (${REVIEW_FILE}). This may mean the review timed out or Codex encountered an error. Check .claude/review-loop.log for details.
+    log "Prepared Codex review for Claude to execute (review_id=$REVIEW_ID)"
 
-Run /review-loop again to retry."
-      jq -n --arg r "$REASON" '{decision:"block", reason:$r}' 2>/dev/null \
-        || printf '{"decision":"block","reason":"Codex ran but did not produce a review file. Check .claude/review-loop.log for details."}\n'
-      exit 0
-    fi
+    REASON="Phase 1 complete. Now run the Codex multi-agent review so you can see its progress.
 
-    REASON="An independent multi-agent code review from Codex has been written to ${REVIEW_FILE}.
+Execute this command (use a 600000ms timeout since reviews can take several minutes):
+\`\`\`
+bash .claude/review-loop-run-codex.sh
+\`\`\`
 
-Please:
+After the review completes, read ${REVIEW_FILE} and address the findings:
 1. Read the review carefully
 2. For each item, independently decide if you agree
 3. For items you AGREE with: implement the fix
@@ -380,14 +389,11 @@ Please:
 
 Use your own judgment. Do not blindly accept every suggestion."
 
-    SYS_MSG="Review Loop [${REVIEW_ID}] — Phase 2/2: Address Codex feedback"
+    SYS_MSG="Review Loop [${REVIEW_ID}] — Phase 2/2: Run Codex review and address feedback"
 
-    # Output block decision — use jq with printf fallback to guarantee valid JSON
-    # reaches stdout even if jq fails (prevents ERR trap from approving exit)
     jq -n --arg r "$REASON" --arg s "$SYS_MSG" \
       '{decision:"block", reason:$r, systemMessage:$s}' 2>/dev/null \
-      || printf '{"decision":"block","reason":"A Codex code review has been written to %s. Please read it and address the findings.","systemMessage":"%s"}\n' \
-           "$REVIEW_FILE" "$SYS_MSG"
+      || printf '{"decision":"block","reason":"Phase 1 complete. Run: bash .claude/review-loop-run-codex.sh then address the review.","systemMessage":"%s"}\n' "$SYS_MSG"
     ;;
 
   addressing)

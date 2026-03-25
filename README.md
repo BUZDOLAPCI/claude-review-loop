@@ -1,31 +1,32 @@
 # review-loop
 
-A Claude Code plugin that adds an automated code review loop to your workflow.
+A Claude Code plugin that adds an automated, continuous code review loop to your workflow.
 
 ## What it does
 
-When you use `/review-loop`, the plugin creates a two-phase lifecycle:
+When you use `/review-loop`, the plugin creates a continuous review cycle (up to 8 rounds):
 
-1. **Task phase**: You describe a task, Claude implements it
-2. **Review phase**: When Claude finishes, the stop hook prepares a [Codex](https://github.com/openai/codex) runner script and blocks exit. Claude then runs Codex directly (with output streaming to the user) and addresses the review feedback.
+1. **Implement**: Claude implements your task, writes an implementation summary, then exits
+2. **Review**: A background orchestrator runs an independent [Codex](https://github.com/openai/codex) review
+3. **Address**: If the review finds issues, a fresh Claude session addresses them
+4. **Repeat**: Back to step 2, until the review passes or max rounds are reached
 
-The result: every task gets an independent second opinion before you accept the changes, and you can watch the review happen in real time.
-
-<img width="2284" height="1959" alt="memelord_meme_2026-02-22 (3)" src="https://github.com/user-attachments/assets/75af1351-47e6-4b70-a50a-9b3311773be7" />
-
+Everything runs in the same terminal — you can watch the entire loop unfold.
 
 ## Review coverage
 
-The plugin spawns up to 4 parallel Codex sub-agents, depending on project type:
+A single Codex reviewer analyzes the changes. The prompt auto-detects project type and adds relevant focus areas:
 
-| Agent | Always runs? | Focus |
-|-------|-------------|-------|
-| **Diff Review** | Yes | `git diff` — code quality, test coverage, security (OWASP top 10) |
-| **Holistic Review** | Yes | Project structure, documentation, AGENTS.md, agent harness, architecture |
-| **Next.js Review** | If `next.config.*` or `"next"` in `package.json` | App Router, Server Components, caching, Server Actions, React performance |
-| **UX Review** | If `app/`, `pages/`, `public/`, or `index.html` exists | Browser E2E via [agent-browser](https://agent-browser.dev/), accessibility, responsive design |
+| Focus | Condition |
+|-------|-----------|
+| **Code correctness** | Always — bugs, edge cases, test gaps, workarounds |
+| **Architecture alignment** | Always — project structure, spec drift, regressions |
+| **React Native / Expo** | If Expo config or `react-native` detected |
+| **Platform parity** | If both `.web.tsx` and `.native.tsx` files exist |
+| **Multi-country** | If HuisHype-style country config detected |
+| **Web UX** | If browser UI directories exist |
 
-After all agents finish, Codex deduplicates findings and writes a single consolidated review to `reviews/review-<id>.md`.
+Each review ends with a verdict: `VERDICT: PASS` (loop ends) or `VERDICT: FAIL` (loop continues).
 
 ## Requirements
 
@@ -33,40 +34,27 @@ After all agents finish, Codex deduplicates findings and writes a single consoli
 - `jq` — `brew install jq` (macOS) / `apt install jq` (Linux)
 - [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex`
 
-### Codex multi-agent
-
-This plugin uses Codex [multi-agent](https://developers.openai.com/codex/multi-agent/) to run parallel review agents. The `/review-loop` command automatically enables it in `~/.codex/config.toml` on first use.
-
-To set it up manually instead:
-
-```toml
-# ~/.codex/config.toml
-[features]
-multi_agent = true
-```
-
 ## Installation
 
 From the CLI:
 
 ```bash
-claude plugin marketplace add hamelsmu/claude-review-loop
-claude plugin install review-loop@hamel-review
+claude plugin marketplace add BUZDOLAPCI/claude-review-loop
+claude plugin install review-loop@caslan-review
 ```
 
 Or from within a Claude Code session:
 
 ```
-/plugin marketplace add hamelsmu/claude-review-loop
-/plugin install review-loop@hamel-review
+/plugin marketplace add BUZDOLAPCI/claude-review-loop
+/plugin install review-loop@caslan-review
 ```
-
 
 ## Updating
 
 ```bash
-claude plugin marketplace update hamel-review
-claude plugin update review-loop@hamel-review
+claude plugin marketplace update caslan-review
+claude plugin update review-loop@caslan-review
 ```
 
 ## Usage
@@ -77,12 +65,13 @@ claude plugin update review-loop@hamel-review
 /review-loop Add user authentication with JWT tokens and test coverage
 ```
 
-Claude will implement the task. When it finishes, the stop hook:
-1. Prepares a Codex runner script and prompt file
-2. Blocks Claude's exit with instructions to run the review
-3. Claude runs `bash .claude/review-loop-run-codex.sh` — Codex output streams to the user
-4. Codex writes findings to `reviews/review-<id>.md`
-5. Claude reads the review, addresses items it agrees with, then stops
+Claude implements the task. When it finishes:
+1. Stop hook blocks exit until Claude writes an implementation summary
+2. Claude writes the summary and exits
+3. Background orchestrator takes over the terminal
+4. Codex reviews the changes → `VERDICT: PASS` or `VERDICT: FAIL`
+5. If FAIL: fresh `claude -p --bare` session addresses findings
+6. Repeat until PASS or 8 rounds
 
 ### Cancel a review loop
 
@@ -90,48 +79,45 @@ Claude will implement the task. When it finishes, the stop hook:
 /cancel-review
 ```
 
+Kills the orchestrator (and any running Claude session) and cleans up all state files.
+
 ## How it works
 
-The plugin uses a **Stop hook** — Claude Code's mechanism for intercepting agent exit. When Claude tries to stop:
+The plugin uses a **Stop hook** to intercept Claude's exit, and a **background orchestrator** for the review loop:
 
-1. The hook reads the state file (`.claude/review-loop.local.md`)
-2. If in `task` phase: writes a runner script and prompt file, transitions to `addressing`, blocks exit with instructions for Claude to run Codex
-3. If in `addressing` phase: allows exit and cleans up
+1. **Stop hook** reads `.claude/review-loop.local.md` — if summary exists, spawns orchestrator and approves exit
+2. **Orchestrator** runs Codex, parses verdict, launches fresh Claude sessions as needed
+3. Headless Claude sessions use `--bare` (skips hooks/plugins) so the stop hook doesn't interfere
 
-State is tracked in `.claude/review-loop.local.md` (add to `.gitignore`). Reviews are written to `reviews/review-<id>.md`.
+State is tracked in `.claude/review-loop.local.md`. Reviews are written to `reviews/review-<id>-round-<n>.md`.
 
 ## File structure
 
 ```
-claude-review-loop/
-├── .claude-plugin/
-│   └── plugin.json           # Plugin manifest
+plugins/review-loop/
+├── hooks/
+│   ├── hooks.json            # Stop hook registration (30s timeout)
+│   ├── stop-hook.sh          # Intercepts exit, spawns orchestrator
+│   └── orchestrator.sh       # Background loop: Codex → Claude → repeat
 ├── commands/
 │   ├── review-loop.md        # /review-loop slash command
 │   └── cancel-review.md      # /cancel-review slash command
-├── hooks/
-│   ├── hooks.json            # Stop hook registration (30s timeout)
-│   └── stop-hook.sh          # Core lifecycle engine
-├── scripts/
-│   └── setup-review-loop.sh  # Argument parsing, state file creation
-├── AGENTS.md                  # Agent operating guidelines
-├── CLAUDE.md                  # Symlink to AGENTS.md
+├── AGENTS.md                 # Agent operating guidelines
+├── CLAUDE.md                 # Symlink to AGENTS.md
 └── README.md
 ```
 
 ## Configuration
 
-The stop hook timeout is set to 30 seconds in `hooks/hooks.json`. The hook itself is fast (it only writes files and returns a block decision); Codex runs separately via Claude's Bash tool.
-
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REVIEW_LOOP_CODEX_FLAGS` | `--dangerously-bypass-approvals-and-sandbox` | Flags passed to `codex`. Set to `--sandbox workspace-write` for safer sandboxed reviews. |
+| `REVIEW_LOOP_CODEX_FLAGS` | `--dangerously-bypass-approvals-and-sandbox` | Flags passed to `codex exec`. |
 
 ### Telemetry
 
-Execution logs are written to `.claude/review-loop.log` with timestamps, codex exit codes, and elapsed times. This file is gitignored.
+Execution logs are written to `.claude/review-loop.log` with timestamps and event details.
 
 ## Credits
 

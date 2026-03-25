@@ -1,7 +1,7 @@
 {
-  "name": "hamel-review",
+  "name": "caslan-review",
   "owner": {
-    "name": "Hamel Husain"
+    "name": "caslan"
   },
   "metadata": {
     "description": "Automated code review loop plugin for Claude Code"
@@ -12,9 +12,9 @@
       "source": "./plugins/review-loop",
       "description": "Automated code review loop: Claude implements, Codex reviews independently, Claude addresses feedback",
       "author": {
-        "name": "Hamel Husain"
+        "name": "caslan"
       },
-      "repository": "https://github.com/hamelsmu/claude-review-loop",
+      "repository": "https://github.com/BUZDOLAPCI/claude-review-loop",
       "license": "MIT",
       "keywords": ["code-review", "codex", "quality", "automation"]
     }

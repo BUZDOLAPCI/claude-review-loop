@@ -135,23 +135,30 @@ You are an independent code reviewer. Review the recent changes in this reposito
 
 ## Context
 
-The task being worked on:
+The current changes are done as a result of this request:
 ${TASK}
 
 ## What to review
 
 Run \`git diff\` and \`git diff --cached\` to see all uncommitted changes. Also run \`git log --oneline -10\` and \`git diff HEAD~5\` for recently committed work.
 
+Check the current changes and review them. Verify every change against the codebase.
+
 Read project documentation: any AGENTS.md, CLAUDE.md files, and if an \`agent-rules/\` directory exists, read the specs there — changes should align with those design decisions.
 
 ## Focus areas
 
 - **Correctness**: Does the code do what it claims? Any bugs, off-by-one errors, race conditions?
-- **Completeness**: Anything missing, half-implemented, or left as TODO?
+- **Completeness**: Check if the changes are complete, correct and finalized. Anything missing, half-implemented, or left as TODO?
 - **Edge cases**: What happens with empty inputs, nulls, concurrent access, error paths?
 - **Test coverage**: Are changes covered by tests? Any obvious gaps?
 - **Architecture alignment**: Do changes fit the project structure and design decisions in docs?
-- **No workarounds**: We don't do workarounds or temporary fixes. Only root cause fixes and optimal solutions. Do the changes reflect that?
+- **Ideal & optimal**: We should always aim for ideal and optimal implementations. No workarounds or temporary fixes. Only root cause fixes and optimal solutions. Do the changes reflect that?
+- **Improvements**: Any missing things? Anything that looks incorrect or incomplete? Any improvements?
+
+Don't make any changes, just report back. Write the review to the file specified above.
+
+Use subagents and tasks to keep main context lean. Orchestrate this work now.
 REVIEW_EOF
 
   if [ "$IS_EXPO_RN" = "true" ]; then
@@ -252,24 +259,27 @@ You are in round ${ROUND}/${MAX} of an automated review loop.
 
 ## Context
 
-The task being worked on:
+The current changes are done as a result of this request:
 ${TASK}
 
 ## What to do
 
 1. Read \`.claude/review-loop-summary.md\` for context from previous rounds (if it exists)
-2. Read the review file: \`${REVIEW_FILE}\`
-3. For each finding in the review:
-   - If you **agree**: implement the fix
+2. Read the review file: \`${REVIEW_FILE}\` — it contains a review of the current changes
+3. Analyze and verify the recommendations and their solutions against the codebase
+4. For each finding in the review:
+   - If you **agree** and the recommendation makes sense: implement the fix
    - If you **disagree**: briefly note why you're skipping it
-4. Focus on **critical** and **high** severity items first
-5. Run the quality gate: typecheck + tests (e.g., \`pnpm -C apps/app typecheck && pnpm -C apps/app test\` or the project's equivalent)
-6. Update \`.claude/review-loop-summary.md\` — append a \`## Round ${ROUND}\` section documenting:
+5. Focus on **critical** and **high** severity items first
+6. Run the quality gate: typecheck + tests (e.g., \`pnpm -C apps/app typecheck && pnpm -C apps/app test\` or the project's equivalent)
+7. Update \`.claude/review-loop-summary.md\` — append a \`## Round ${ROUND}\` section documenting:
    - What you fixed
    - What you skipped and why
    - Quality gate results
 
-Use your own judgment. Do not blindly implement every suggestion — you are the author and know the codebase better than the reviewer.
+Use your own judgment. Do not blindly implement every suggestion — verify recommendations against the codebase before acting on them.
+
+Use tasks and subagents to keep main context lean. Orchestrate this work now.
 CLAUDE_EOF
 }
 
@@ -380,8 +390,8 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
   CLAUDE_PROMPT=$(build_claude_prompt "$NEXT_ITERATION" "$MAX_ITERATIONS" "$REVIEW_FILE" "$TASK")
   printf '%s' "$CLAUDE_PROMPT" > "$PROMPT_FILE"
 
-  # Launch headless Claude session
-  claude -p --bare --dangerously-skip-permissions --add-dir . < "$PROMPT_FILE" &
+  # Launch headless Claude session (no --bare: gets full CLAUDE.md, plugins, MCP, LSP context)
+  claude -p --dangerously-skip-permissions < "$PROMPT_FILE" &
   CLAUDE_PID=$!
   log "Claude launched (PID=$CLAUDE_PID) for round $NEXT_ITERATION"
 

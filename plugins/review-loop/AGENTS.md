@@ -84,7 +84,8 @@ Unparseable verdicts are treated as FAIL.
 - Fail-open: on any error, approve exit
 - Review ID validated: `^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$`
 - Orchestrator outputs to `/dev/tty` (fallback: log file if no terminal)
-- Headless Claude uses `--bare` flag (skips hooks, plugins, CLAUDE.md auto-discovery)
+- Headless Claude runs WITHOUT `--bare` — gets full CLAUDE.md, plugins, MCP, LSP context
+- Stop hook handles `orchestrated` phase by approving without cleanup (prevents interference with orchestrator loop)
 - Phase transitions use awk rewrite (not sed)
 - All `jq` calls have `|| printf '...'` fallbacks
 - Cleanup functions start with `set +e` to prevent ERR trap recursion

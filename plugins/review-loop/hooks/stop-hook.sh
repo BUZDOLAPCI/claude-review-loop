@@ -100,6 +100,13 @@ This summary is used by the review loop to understand what was done."
     fi
     ;;
 
+  orchestrated)
+    # Headless Claude session exiting during orchestrator loop — approve without cleanup.
+    # The orchestrator manages the state file lifecycle.
+    log "Orchestrated session exiting, approving"
+    printf '{"decision":"approve"}\n'
+    ;;
+
   *)
     # Unknown phase — clean up and allow exit
     log "WARN: unknown phase '$PHASE', cleaning up"

@@ -18,7 +18,7 @@ MAX_ITERATIONS="${2:?Usage: orchestrator.sh <REVIEW_ID> <MAX_ITERATIONS>}"
 
 LOG_FILE=".claude/review-loop.log"
 STATE_FILE=".claude/review-loop.local.md"
-SUMMARY_FILE=".claude/review-loop-summary.md"
+INITIAL_SUMMARY=".claude/review-loop-summary.md"
 PID_FILE=".claude/review-loop-orchestrator.pid"
 PROMPT_FILE=".claude/review-loop-claude-prompt.txt"
 
@@ -118,6 +118,7 @@ detect_browser_ui() {
 build_review_prompt() {
   local REVIEW_FILE="$1"
   local TASK="$2"
+  local LOOP_DIR="$3"
 
   local IS_EXPO_RN=false
   local IS_MULTI_PLATFORM=false
@@ -138,6 +139,15 @@ You are an independent code reviewer. Review the recent changes in this reposito
 The current changes are done as a result of this request:
 ${TASK}
 
+## Previous rounds
+
+This review loop's conversation history is in: \`${LOOP_DIR}/\`
+Read ALL files there (summary-*.md and review-*.md, in order) to understand:
+- What was already reviewed and what the implementer agreed/disagreed with
+- What was fixed and what was intentionally skipped (and why)
+- If the implementer presents a valid reason for skipping a finding, check if it is valid, and accept it unless you disagree and can counter with facts
+If this is the first round, the directory will only contain the initial implementation summary (summary-0.md).
+
 ## What to review
 
 Run \`git diff\` and \`git diff --cached\` to see all uncommitted changes. Also run \`git log --oneline -10\` and \`git diff HEAD~5\` for recently committed work.
@@ -150,7 +160,7 @@ Read project documentation: any AGENTS.md, CLAUDE.md files, and if an \`agent-ru
 
 - **Correctness**: Does the code do what it claims? Any bugs, off-by-one errors, race conditions?
 - **Completeness**: Check if the changes are complete, correct and finalized. Anything missing, half-implemented, or left as TODO?
-- **Edge cases**: What happens with empty inputs, nulls, concurrent access, error paths?
+- **Edge cases**: Are foreseeable edge cases covered? Any unexpected behavior?
 - **Test coverage**: Are changes covered by tests? Any obvious gaps?
 - **Architecture alignment**: Do changes fit the project structure and design decisions in docs?
 - **Ideal & optimal**: We should always aim for ideal and optimal implementations. No workarounds or temporary fixes. Only root cause fixes and optimal solutions. Do the changes reflect that?
@@ -253,6 +263,7 @@ build_claude_prompt() {
   local MAX="$2"
   local REVIEW_FILE="$3"
   local TASK="$4"
+  local LOOP_DIR="$5"
 
   cat << CLAUDE_EOF
 You are in round ${ROUND}/${MAX} of an automated review loop.
@@ -264,15 +275,15 @@ ${TASK}
 
 ## What to do
 
-1. Read \`.claude/review-loop-summary.md\` for context from previous rounds (if it exists)
-2. Read the review file: \`${REVIEW_FILE}\` — it contains a review of the current changes
+1. Read ALL files in \`${LOOP_DIR}/\` (review-*.md and summary-*.md, in order) to understand the full conversation history
+2. Focus on the latest review: \`${REVIEW_FILE}\`
 3. Analyze and verify the recommendations and their solutions against the codebase
 4. For each finding in the review:
    - If you **agree** and the recommendation makes sense: implement the fix
    - If you **disagree**: briefly note why you're skipping it
 5. Focus on **critical** and **high** severity items first
 6. Run the quality gate: typecheck + tests (e.g., \`pnpm -C apps/app typecheck && pnpm -C apps/app test\` or the project's equivalent)
-7. Update \`.claude/review-loop-summary.md\` — append a \`## Round ${ROUND}\` section documenting:
+7. Write your response to \`${LOOP_DIR}/summary-${ROUND}.md\` documenting:
    - What you fixed
    - What you skipped and why
    - Quality gate results
@@ -294,6 +305,14 @@ if [ -z "$TASK" ]; then
   TASK="(no task description available)"
 fi
 
+# Set up per-loop directory and move initial summary into it
+LOOP_DIR="reviews/review-loop-${REVIEW_ID}"
+mkdir -p "$LOOP_DIR"
+if [ -f "$INITIAL_SUMMARY" ]; then
+  mv "$INITIAL_SUMMARY" "${LOOP_DIR}/summary-0.md"
+  log "Moved initial summary to ${LOOP_DIR}/summary-0.md"
+fi
+
 # Codex flags
 CODEX_FLAGS="${REVIEW_LOOP_CODEX_FLAGS:---dangerously-bypass-approvals-and-sandbox}"
 
@@ -312,17 +331,15 @@ fi
 ITERATION=$(parse_field "iteration")
 ITERATION="${ITERATION:-1}"
 
-mkdir -p reviews
-
 while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
-  REVIEW_FILE="reviews/review-${REVIEW_ID}-round-${ITERATION}.md"
+  REVIEW_FILE="${LOOP_DIR}/review-${ITERATION}.md"
 
   # ── Codex Review ──────────────────────────────────────────────────────────
 
   status_banner "Round ${ITERATION}/${MAX_ITERATIONS} -- Codex Review"
   log "Round ${ITERATION}/${MAX_ITERATIONS}: starting Codex review"
 
-  REVIEW_PROMPT=$(build_review_prompt "$REVIEW_FILE" "$TASK")
+  REVIEW_PROMPT=$(build_review_prompt "$REVIEW_FILE" "$TASK" "$LOOP_DIR")
   START_TIME=$(date +%s)
 
   # Run Codex single-reviewer
@@ -387,7 +404,7 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
   status_banner "Round ${ITERATION}/${MAX_ITERATIONS} -- Claude Addressing Findings"
   log "Launching Claude to address findings from round $ITERATION"
 
-  CLAUDE_PROMPT=$(build_claude_prompt "$NEXT_ITERATION" "$MAX_ITERATIONS" "$REVIEW_FILE" "$TASK")
+  CLAUDE_PROMPT=$(build_claude_prompt "$ITERATION" "$MAX_ITERATIONS" "$REVIEW_FILE" "$TASK" "$LOOP_DIR")
   printf '%s' "$CLAUDE_PROMPT" > "$PROMPT_FILE"
 
   # Launch headless Claude session (no --bare: gets full CLAUDE.md, plugins, MCP, LSP context)

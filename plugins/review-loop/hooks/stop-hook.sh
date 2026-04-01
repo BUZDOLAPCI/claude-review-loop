@@ -8,7 +8,6 @@
 # On any error, default to allowing exit (never trap the user in a broken loop).
 
 LOG_FILE=".claude/review-loop.log"
-SUMMARY_FILE=".claude/review-loop-summary.md"
 
 log() {
   mkdir -p "$(dirname "$LOG_FILE")"
@@ -56,6 +55,8 @@ fi
 
 case "$PHASE" in
   task)
+    LOOP_DIR="reviews/review-loop-${REVIEW_ID}"
+    SUMMARY_FILE="${LOOP_DIR}/summary-0.md"
     if [ -f "$SUMMARY_FILE" ]; then
       # Summary exists — spawn orchestrator detached and approve exit
       PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -82,7 +83,7 @@ case "$PHASE" in
       printf '{"decision":"approve"}\n'
     else
       # No summary yet — block and tell Claude to write one
-      REASON="Before exiting, write an implementation summary to ${SUMMARY_FILE}.
+      REASON="Before exiting, write an implementation summary to ${SUMMARY_FILE}
 
 Include:
 - Files changed (with brief description of each change)

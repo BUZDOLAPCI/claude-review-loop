@@ -18,7 +18,7 @@ MAX_ITERATIONS="${2:?Usage: orchestrator.sh <REVIEW_ID> <MAX_ITERATIONS>}"
 
 LOG_FILE=".claude/review-loop.log"
 STATE_FILE=".claude/review-loop.local.md"
-INITIAL_SUMMARY=".claude/review-loop-summary.md"
+LOOP_DIR=""
 PID_FILE=".claude/review-loop-orchestrator.pid"
 PROMPT_FILE=".claude/review-loop-claude-prompt.txt"
 
@@ -305,13 +305,9 @@ if [ -z "$TASK" ]; then
   TASK="(no task description available)"
 fi
 
-# Set up per-loop directory and move initial summary into it
+# Per-loop directory (created by setup command, ensure it exists)
 LOOP_DIR="reviews/review-loop-${REVIEW_ID}"
 mkdir -p "$LOOP_DIR"
-if [ -f "$INITIAL_SUMMARY" ]; then
-  mv "$INITIAL_SUMMARY" "${LOOP_DIR}/summary-0.md"
-  log "Moved initial summary to ${LOOP_DIR}/summary-0.md"
-fi
 
 # Codex flags
 CODEX_FLAGS="${REVIEW_LOOP_CODEX_FLAGS:---dangerously-bypass-approvals-and-sandbox}"

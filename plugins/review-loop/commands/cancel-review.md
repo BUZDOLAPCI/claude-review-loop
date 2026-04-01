@@ -23,7 +23,7 @@ if [ -f .claude/review-loop-orchestrator.pid ]; then
     echo "Orchestrator not running (stale PID file)"
   fi
 fi
-rm -f .claude/review-loop.local.md .claude/review-loop.lock .claude/review-loop-orchestrator.pid .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt .claude/review-loop-retries .claude/review-loop-claude-prompt.txt .claude/review-loop-summary.md
+rm -f .claude/review-loop.local.md .claude/review-loop.lock .claude/review-loop-orchestrator.pid .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt .claude/review-loop-retries .claude/review-loop-claude-prompt.txt
 echo "Review loop cancelled and cleaned up."
 ```
 

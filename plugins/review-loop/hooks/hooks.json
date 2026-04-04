@@ -1,14 +1,12 @@
 {
-  "description": "Review loop stop hook: runs Codex review after task completion, then has Claude address feedback",
+  "description": "Review loop stop hook: orchestrates Codex review cycles after task completion",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-hook.sh",
-            "timeout": 30,
-            "statusMessage": "Review loop: checking phase..."
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-hook.sh"
           }
         ]
       }

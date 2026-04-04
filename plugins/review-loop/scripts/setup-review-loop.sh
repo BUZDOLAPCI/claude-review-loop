@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Review Loop — Setup Script
-# Creates state file and prepares the review loop lifecycle.
+# Creates per-instance state file and prepares the review loop lifecycle.
+# All per-instance files live under reviews/review-loop-{ID}/
 
 ARGS=()
 
@@ -16,6 +17,8 @@ Starts a review loop:
   1. Claude implements your task
   2. Codex performs an independent code review
   3. Claude addresses the feedback
+
+Multiple review loops can run concurrently — each gets its own isolated directory.
 
 Environment variables:
   REVIEW_LOOP_CODEX_FLAGS  Override codex flags (default: --dangerously-bypass-approvals-and-sandbox)
@@ -54,12 +57,6 @@ if ! command -v jq &> /dev/null; then
   exit 1
 fi
 
-# Check for existing loop
-if [ -f ".claude/review-loop.local.md" ]; then
-  echo "Error: A review loop is already active. Use /cancel-review to abort it first."
-  exit 1
-fi
-
 # Generate unique ID: timestamp + random hex
 # Prefer openssl, fallback to /dev/urandom
 if command -v openssl &> /dev/null; then
@@ -69,35 +66,38 @@ else
 fi
 REVIEW_ID="$(date +%Y%m%d-%H%M%S)-${RAND_HEX}"
 
-# Clean up stale lock from previous runs
-rm -f .claude/review-loop.lock
+LOOP_DIR="reviews/review-loop-${REVIEW_ID}"
+TEMP_DIR="${LOOP_DIR}/temp"
 
-# Create state file
+# Create per-instance directories
+mkdir -p "$TEMP_DIR"
+
+# Write session breadcrumb (links this Claude session to the review ID)
 mkdir -p .claude
-cat > .claude/review-loop.local.md << STATE_EOF
+echo "$REVIEW_ID" > ".claude/rl-session-${PPID}"
+
+# Create state file in per-instance temp directory
+cat > "${TEMP_DIR}/state.md" << STATE_EOF
 ---
 active: true
 phase: task
 review_id: ${REVIEW_ID}
+iteration: 1
+max_iterations: 6
 started_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 ---
 
 ${PROMPT}
 STATE_EOF
 
-# Ensure reviews directory exists
-mkdir -p reviews
-
 echo ""
 echo "Review Loop activated"
 echo "  ID:      ${REVIEW_ID}"
+echo "  Dir:     ${LOOP_DIR}"
 echo "  Phase:   1/2 — Task implementation"
-echo "  Review:  reviews/review-${REVIEW_ID}.md"
 echo ""
 echo "  Lifecycle:"
 echo "    1. You implement the task"
-echo "    2. Stop hook runs Codex for independent review"
-echo "    3. You address the feedback"
-echo ""
-echo "  Use /cancel-review to abort."
+echo "    2. Stop hook runs Codex review loop (foreground)"
+echo "    3. Ctrl+C to cancel at any time"
 echo ""

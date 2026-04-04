@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Review Loop — Background Orchestrator
+# Review Loop — Orchestrator (concurrent-safe)
 #
-# Spawned by the stop hook after the first Claude session exits.
-# Manages the continuous review loop: Codex reviews → Claude addresses → repeat.
+# Called synchronously by the stop hook after the implementation summary is written.
+# Runs in the foreground — Ctrl+C propagates SIGINT to the entire process group.
+# All per-instance files live under reviews/review-loop-{ID}/temp/
 #
 # Usage: orchestrator.sh <REVIEW_ID> <MAX_ITERATIONS>
 #   REVIEW_ID:      Format YYYYMMDD-HHMMSS-hexhex
-#   MAX_ITERATIONS: Integer, typically 8
+#   MAX_ITERATIONS: Integer, typically 6
 #
 # Environment variables:
 #   REVIEW_LOOP_CODEX_FLAGS  Override codex flags (default: --dangerously-bypass-approvals-and-sandbox)
@@ -16,19 +17,65 @@ set -euo pipefail
 REVIEW_ID="${1:?Usage: orchestrator.sh <REVIEW_ID> <MAX_ITERATIONS>}"
 MAX_ITERATIONS="${2:?Usage: orchestrator.sh <REVIEW_ID> <MAX_ITERATIONS>}"
 
-LOG_FILE=".claude/review-loop.log"
-STATE_FILE=".claude/review-loop.local.md"
-LOOP_DIR=""
-PID_FILE=".claude/review-loop-orchestrator.pid"
-PROMPT_FILE=".claude/review-loop-claude-prompt.txt"
+# ── Per-instance paths ───────────────────────────────────────────────────────
+
+LOOP_DIR="reviews/review-loop-${REVIEW_ID}"
+TEMP_DIR="${LOOP_DIR}/temp"
+LOG_FILE="${TEMP_DIR}/loop.log"
+STATE_FILE="${TEMP_DIR}/state.md"
+PROMPT_FILE="${TEMP_DIR}/claude-prompt.txt"
+STATUS_FILE="${TEMP_DIR}/status"
 
 CLAUDE_PID=""
+HEARTBEAT_PID=""
+MAIN_START=$(date +%s)
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
 log() {
-  mkdir -p "$(dirname "$LOG_FILE")"
+  mkdir -p "$TEMP_DIR"
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] [orchestrator] $*" >> "$LOG_FILE"
+}
+
+# ── Heartbeat — periodic status line to prove we're alive ────────────────────
+
+fmt_elapsed() {
+  local secs=$1
+  if [ "$secs" -ge 3600 ]; then
+    printf '%dh%02dm' $((secs / 3600)) $(((secs % 3600) / 60))
+  elif [ "$secs" -ge 60 ]; then
+    printf '%dm%02ds' $((secs / 60)) $((secs % 60))
+  else
+    printf '%ds' "$secs"
+  fi
+}
+
+set_status() {
+  printf '%s' "$1" > "$STATUS_FILE" 2>/dev/null || true
+}
+
+start_heartbeat() {
+  local start=$1 status_file=$2
+  (
+    trap 'exit 0' TERM INT
+    while true; do
+      sleep 30
+      elapsed=$(($(date +%s) - start))
+      mins=$((elapsed / 60))
+      secs=$((elapsed % 60))
+      status=$(cat "$status_file" 2>/dev/null) || status="running"
+      printf '\033[90m  ⏳ %02d:%02d │ %s\033[0m\n' "$mins" "$secs" "$status" 2>/dev/null || true
+    done
+  ) &
+  HEARTBEAT_PID=$!
+}
+
+stop_heartbeat() {
+  if [ -n "${HEARTBEAT_PID:-}" ]; then
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+    HEARTBEAT_PID=""
+  fi
 }
 
 status_banner() {
@@ -71,13 +118,25 @@ get_task_description() {
 cleanup() {
   set +e
 
+  stop_heartbeat
+
   if [ -n "$CLAUDE_PID" ] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
     log "Killing child Claude process (PID=$CLAUDE_PID)"
     kill "$CLAUDE_PID" 2>/dev/null
     wait "$CLAUDE_PID" 2>/dev/null
   fi
 
-  rm -f "$STATE_FILE" "$PROMPT_FILE" "$PID_FILE"
+  # Remove per-instance temp files (keep logs and review/summary files)
+  rm -f "$STATE_FILE" "$PROMPT_FILE" "$STATUS_FILE"
+
+  # Clean up session breadcrumbs pointing to this review ID
+  for f in .claude/rl-session-*; do
+    [ -f "$f" ] || continue
+    if [ "$(cat "$f" 2>/dev/null)" = "$REVIEW_ID" ]; then
+      rm -f "$f"
+    fi
+  done
+
   log "Orchestrator exiting (cleanup complete)"
 }
 
@@ -305,16 +364,11 @@ if [ -z "$TASK" ]; then
   TASK="(no task description available)"
 fi
 
-# Per-loop directory (created by setup command, ensure it exists)
-LOOP_DIR="reviews/review-loop-${REVIEW_ID}"
-mkdir -p "$LOOP_DIR"
+# Ensure temp dir exists
+mkdir -p "$TEMP_DIR"
 
 # Codex flags
 CODEX_FLAGS="${REVIEW_LOOP_CODEX_FLAGS:---dangerously-bypass-approvals-and-sandbox}"
-
-# Write PID file
-mkdir -p "$(dirname "$PID_FILE")"
-echo $$ > "$PID_FILE"
 
 # Validate codex is on PATH
 if ! command -v codex &>/dev/null; then
@@ -327,16 +381,21 @@ fi
 ITERATION=$(parse_field "iteration")
 ITERATION="${ITERATION:-1}"
 
+# Start heartbeat (prints status every 30s as proof of life)
+set_status "Round ${ITERATION}/${MAX_ITERATIONS} — starting"
+start_heartbeat "$MAIN_START" "$STATUS_FILE"
+
 while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
   REVIEW_FILE="${LOOP_DIR}/review-${ITERATION}.md"
 
   # ── Codex Review ──────────────────────────────────────────────────────────
 
   status_banner "Round ${ITERATION}/${MAX_ITERATIONS} -- Codex Review"
+  set_status "Round ${ITERATION}/${MAX_ITERATIONS} — Codex reviewing"
   log "Round ${ITERATION}/${MAX_ITERATIONS}: starting Codex review"
 
   REVIEW_PROMPT=$(build_review_prompt "$REVIEW_FILE" "$TASK" "$LOOP_DIR")
-  START_TIME=$(date +%s)
+  STAGE_START=$(date +%s)
 
   # Run Codex single-reviewer
   # shellcheck disable=SC2086
@@ -346,8 +405,8 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
     exit 1
   fi
 
-  ELAPSED=$(( $(date +%s) - START_TIME ))
-  log "Codex review completed in ${ELAPSED}s"
+  STAGE_ELAPSED=$(($(date +%s) - STAGE_START))
+  log "Codex review completed in ${STAGE_ELAPSED}s"
 
   # Verify review file was created
   if [ ! -f "$REVIEW_FILE" ]; then
@@ -356,7 +415,9 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
     exit 1
   fi
 
-  log "Review file created: $REVIEW_FILE ($(wc -c < "$REVIEW_FILE") bytes)"
+  REVIEW_BYTES=$(wc -c < "$REVIEW_FILE" 2>/dev/null || echo 0)
+  log "Review file created: $REVIEW_FILE (${REVIEW_BYTES} bytes)"
+  printf '  \033[32m✓\033[0m Codex review done (%s, %s bytes)\n' "$(fmt_elapsed $STAGE_ELAPSED)" "$REVIEW_BYTES"
 
   # ── Parse Verdict ─────────────────────────────────────────────────────────
 
@@ -376,7 +437,8 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
   # ── PASS → done ───────────────────────────────────────────────────────────
 
   if [ "$VERDICT" = "PASS" ]; then
-    status_banner "PASS -- Review loop complete (round ${ITERATION}/${MAX_ITERATIONS})"
+    TOTAL_ELAPSED=$(($(date +%s) - MAIN_START))
+    status_banner "PASS -- Review loop complete (round ${ITERATION}/${MAX_ITERATIONS}, total $(fmt_elapsed $TOTAL_ELAPSED))"
     log "Review loop completed with PASS in round $ITERATION"
     cleanup
     exit 0
@@ -385,7 +447,8 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
   # ── Max iterations reached → done ─────────────────────────────────────────
 
   if [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
-    status_banner "Max iterations reached (${MAX_ITERATIONS}) -- Review loop ending"
+    TOTAL_ELAPSED=$(($(date +%s) - MAIN_START))
+    status_banner "Max iterations reached (${MAX_ITERATIONS}, total $(fmt_elapsed $TOTAL_ELAPSED)) -- Review loop ending"
     log "Review loop ended: max iterations reached ($MAX_ITERATIONS) with verdict FAIL"
     cleanup
     exit 0
@@ -398,20 +461,34 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
   update_field "phase" "orchestrated"
 
   status_banner "Round ${ITERATION}/${MAX_ITERATIONS} -- Claude Addressing Findings"
+  set_status "Round ${ITERATION}/${MAX_ITERATIONS} — Claude addressing findings"
   log "Launching Claude to address findings from round $ITERATION"
 
   CLAUDE_PROMPT=$(build_claude_prompt "$ITERATION" "$MAX_ITERATIONS" "$REVIEW_FILE" "$TASK" "$LOOP_DIR")
   printf '%s' "$CLAUDE_PROMPT" > "$PROMPT_FILE"
 
+  STAGE_START=$(date +%s)
+
   # Launch headless Claude session (no --bare: gets full CLAUDE.md, plugins, MCP, LSP context)
   claude -p --dangerously-skip-permissions < "$PROMPT_FILE" &
   CLAUDE_PID=$!
+
+  # Write session breadcrumb so the stop hook can identify this headless session
+  mkdir -p .claude
+  echo "$REVIEW_ID" > ".claude/rl-session-${CLAUDE_PID}"
+
   log "Claude launched (PID=$CLAUDE_PID) for round $NEXT_ITERATION"
 
   # Wait for Claude to finish (non-zero exit is a warning, not a fatal error)
   if ! wait "$CLAUDE_PID"; then
     log "WARNING: Claude exited with non-zero status (PID=$CLAUDE_PID) in round $ITERATION"
   fi
+
+  STAGE_ELAPSED=$(($(date +%s) - STAGE_START))
+  printf '  \033[32m✓\033[0m Claude addressing done (%s)\n' "$(fmt_elapsed $STAGE_ELAPSED)"
+
+  # Clean up this session's breadcrumb
+  rm -f ".claude/rl-session-${CLAUDE_PID}"
   CLAUDE_PID=""
 
   # Clean up prompt file
@@ -419,6 +496,7 @@ while [ "$ITERATION" -le "$MAX_ITERATIONS" ]; do
 
   # Advance to next iteration
   ITERATION=$NEXT_ITERATION
+  set_status "Round ${ITERATION}/${MAX_ITERATIONS} — starting"
 done
 
 # Should not reach here, but just in case
